@@ -1,0 +1,20 @@
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import {WebSocketServer} from "ws";
+import {z} from "zod";
+import {createServer} from "node:http";
+import {createArchive,getClusterHealth,ingestLog,listArchives,listClusters,recentLogs} from "./service";
+export const app=express(); app.use(cors()); app.use(express.json({limit:"256kb"}));
+const schema=z.object({clusterId:z.string().min(1).max(100),pod:z.string().min(1).max(200),level:z.enum(["debug","info","warn","error"]),message:z.string().min(1).max(12000)});
+app.get("/health",(_req,res)=>res.json({status:"ok",service:"kubernetes-cluster-health-log-streaming"}));
+app.get("/clusters",(_req,res)=>res.json({items:listClusters()}));
+app.get("/clusters/:clusterId/health",(req,res)=>{const c=getClusterHealth(req.params.clusterId);if(!c)return res.status(404).json({error:"Cluster not found in demo inventory"});return res.json(c);});
+app.post("/logs",(req,res)=>{const parsed=schema.safeParse(req.body);if(!parsed.success)return res.status(400).json({error:"Invalid log event",issues:parsed.error.issues});const event=ingestLog(parsed.data);wss.clients.forEach(client=>{if(client.readyState===1)client.send(JSON.stringify({type:"log",data:event}));});return res.status(201).json({event,streamedToConnectedClients:true});});
+app.get("/logs/recent",(req,res)=>{const n=Number(req.query.limit??100);const limit=Number.isFinite(n)?Math.max(1,Math.min(500,Math.floor(n))):100;return res.json({items:recentLogs(limit)});});
+app.post("/diagnostics/archive",(_req,res)=>res.status(201).json(createArchive()));
+app.get("/diagnostics/archive",(_req,res)=>res.json({items:listArchives()}));
+const server=createServer(app); const wss=new WebSocketServer({noServer:true});
+server.on("upgrade",(request,socket,head)=>{if(request.url!=="/ws"){socket.destroy();return;}wss.handleUpgrade(request,socket,head,ws=>wss.emit("connection",ws,request));});
+wss.on("connection",ws=>ws.send(JSON.stringify({type:"connected",message:"Log stream connected"})));
+if(require.main===module){const port=Number(process.env.PORT||3001);server.listen(port,()=>console.log(`Cluster health API listening on ${port}`));}
